@@ -17,6 +17,9 @@ jobs:
       image: ps2dev/ps2dev:latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install make
+        shell: sh
+        run: apk add --no-cache make
       - name: Build
         shell: sh
         run: |
