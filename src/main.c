@@ -50,20 +50,17 @@ static void draw_texture(GSTEXTURE *t,float x,float y,float w,float h,int flip) 
     u64 white=GS_SETREG_RGBAQ(0xFF,0xFF,0xFF,0xFF,0x00);
     gsKit_set_primalpha(gs,GS_SETREG_ALPHA(0,1,0,1,0),0);
     gsKit_set_test(gs,GS_ATEST_OFF);
-    if (flip)
+    if (flip) {
         gsKit_prim_sprite_texture(gs,t,x,y,0,(float)t->Width,x+w,y+h,0,(float)t->Height,2,white);
-    else
+    } else {
         gsKit_prim_sprite_texture(gs,t,x,y,0,0,x+w,y+h,(float)t->Width,(float)t->Height,2,white);
+    }
     gsKit_set_test(gs,GS_ATEST_ON);
     gsKit_set_primalpha(gs,GS_BLEND_BACK2FRONT,0);
 }
 static void rect(float x, float y, float w, float h, u64 color) {
     gsKit_prim_sprite(gs, x, y, x + w, y + h, 2, color);
 }
-static void tri(float x1,float y1,float x2,float y2,float x3,float y3,u64 color) {
-    gsKit_prim_triangle(gs,x1,y1,x2,y2,x3,y3,2,color);
-}
-
 /* Compact 5x7 font. Each row is a five-bit mask, MSB is the left pixel. */
 typedef struct { char ch; unsigned char row[7]; } Glyph;
 static const Glyph font[] = {
@@ -196,18 +193,13 @@ static void draw_scene(void) {
 }
 
 static int setup_pad(void) {
-    int retries=0;
     SifInitRpc(0);
     SifLoadModule("rom0:SIO2MAN",0,NULL);
     SifLoadModule("rom0:PADMAN",0,NULL);
     padInit(0);
     if (!padPortOpen(0,0,padBuf)) return 0;
-    while (retries++ < 80) {
-        int state=padGetState(0,0);
-        if (state == PAD_STATE_STABLE || state == PAD_STATE_FINDCTP1) return 1;
-        DelayThread(10000);
-    }
-    return 1; /* allow booting; input can become available after startup */
+    /* Pad state is polled in the main loop; do not block startup waiting for it. */
+    return 1;
 }
 static int read_buttons(void) {
     int state=padGetState(0,0);
