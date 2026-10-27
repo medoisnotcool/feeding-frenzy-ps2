@@ -1,0 +1,32 @@
+name: Build PS2 ELF
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'assets/**'
+      - 'tools/**'
+      - 'Makefile'
+      - '.github/workflows/build-ps2.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ps2dev/ps2dev:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: bash
+        run: |
+          export PS2DEV=/usr/local/ps2dev
+          export PS2SDK="$PS2DEV/ps2sdk"
+          export GSKIT="$PS2DEV/gsKit"
+          export PATH="$PATH:$PS2DEV/bin:$PS2DEV/ee/bin:$PS2SDK/bin"
+          make clean all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FishFrenzy-PS2-ELF
+          path: fishfrenzy.elf
+          if-no-files-found: error
