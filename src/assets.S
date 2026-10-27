@@ -16,15 +16,51 @@ asset_city_bg:
 asset_logo:
 .incbin "assets/converted/logo.rgba"
 .balign 16
-.global asset_player
-asset_player:
-.incbin "assets/converted/player.rgba"
+.global asset_player_0
+asset_player_0:
+.incbin "assets/converted/player_0.rgba"
 .balign 16
-.global asset_prey
-asset_prey:
-.incbin "assets/converted/prey.rgba"
+.global asset_player_1
+asset_player_1:
+.incbin "assets/converted/player_1.rgba"
 .balign 16
-.global asset_predator
-asset_predator:
-.incbin "assets/converted/predator.rgba"
+.global asset_player_2
+asset_player_2:
+.incbin "assets/converted/player_2.rgba"
+.balign 16
+.global asset_player_3
+asset_player_3:
+.incbin "assets/converted/player_3.rgba"
+.balign 16
+.global asset_prey_0
+asset_prey_0:
+.incbin "assets/converted/prey_0.rgba"
+.balign 16
+.global asset_prey_1
+asset_prey_1:
+.incbin "assets/converted/prey_1.rgba"
+.balign 16
+.global asset_prey_2
+asset_prey_2:
+.incbin "assets/converted/prey_2.rgba"
+.balign 16
+.global asset_prey_3
+asset_prey_3:
+.incbin "assets/converted/prey_3.rgba"
+.balign 16
+.global asset_predator_0
+asset_predator_0:
+.incbin "assets/converted/predator_0.rgba"
+.balign 16
+.global asset_predator_1
+asset_predator_1:
+.incbin "assets/converted/predator_1.rgba"
+.balign 16
+.global asset_predator_2
+asset_predator_2:
+.incbin "assets/converted/predator_2.rgba"
+.balign 16
+.global asset_predator_3
+asset_predator_3:
+.incbin "assets/converted/predator_3.rgba"
 .balign 16

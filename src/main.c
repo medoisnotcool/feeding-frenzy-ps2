@@ -1,7 +1,7 @@
 /*
  * Fish Frenzy: PS2 homebrew adaptation
- * A lightweight, controller-driven feeding-frenzy arcade game.
- * Graphics are drawn from GS primitives; no external art/audio files needed.
+ * Controller-driven PS2 adaptation with embedded original art and sprite animation.
+ * All game textures are embedded; no runtime filesystem access is needed.
  */
 #include <tamtypes.h>
 #include <kernel.h>
@@ -13,32 +13,36 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 #define SW 640
 #define MAX_ENEMIES 9
-#define MAX_BUBBLES 12
+#define MAX_BUBBLES 6
 #define PLAYER_SPEED 3.1f
 #define SCORE_STEP 350
 
 typedef enum { TITLE, PLAYING, PAUSED, GAME_OVER } Screen;
 typedef struct { float x, y, r, vx; int kind, alive; } Fish;
-typedef struct { float x, y, speed; } Bubble;
 
 static GSGLOBAL *gs;
 extern unsigned char asset_menu_bg[], asset_reef_bg[], asset_city_bg[];
-extern unsigned char asset_logo[], asset_player[], asset_prey[], asset_predator[];
-static GSTEXTURE texMenu, texReef, texCity, texLogo, texPlayer, texPrey, texPredator;
+extern unsigned char asset_logo[];
+extern unsigned char asset_player_0[], asset_player_1[], asset_player_2[], asset_player_3[];
+extern unsigned char asset_prey_0[], asset_prey_1[], asset_prey_2[], asset_prey_3[];
+extern unsigned char asset_predator_0[], asset_predator_1[], asset_predator_2[], asset_predator_3[];
+static GSTEXTURE texMenu, texReef, texCity, texLogo;
+static GSTEXTURE texPlayer[4], texPrey[4], texPredator[4];
 static char padBuf[256] __attribute__((aligned(64)));
 static struct padButtonStatus padStatus;
-static u64 cDeep, cWater, cStripe, cWhite, cInk, cCyan, cGold, cCoral, cGreen, cDim;
+static int padModeRequested=0;
+static u64 cDeep, cWhite, cCyan, cGold, cCoral, cDim;
 static Screen screen = TITLE;
 static Fish player;
 static Fish enemies[MAX_ENEMIES];
-static Bubble bubbles[MAX_BUBBLES];
 static int points = 0, lives = 3, level = 1, lastButtons = 0xFFFF;
 static int frameCount = 0, dashCooldown = 0, dashFrames = 0;
 
-static u64 rgba(int r, int g, int b) { return GS_SETREG_RGBAQ(r, g, b, 0x00, 0x00); }
+static u64 rgba(int r, int g, int b) { return GS_SETREG_RGBAQ(r, g, b, 0x80, 0x00); }
 static void upload_tex(GSTEXTURE *t, unsigned char *pixels, int w, int h) {
     memset(t, 0, sizeof(*t));
     t->Width=(u32)w; t->Height=(u32)h; t->PSM=GS_PSM_CT32;
@@ -47,16 +51,13 @@ static void upload_tex(GSTEXTURE *t, unsigned char *pixels, int w, int h) {
     gsKit_texture_upload(gs,t);
 }
 static void draw_texture(GSTEXTURE *t,float x,float y,float w,float h,int flip) {
-    u64 white=GS_SETREG_RGBAQ(0xFF,0xFF,0xFF,0xFF,0x00);
-    gsKit_set_primalpha(gs,GS_SETREG_ALPHA(0,1,0,1,0),0);
-    gsKit_set_test(gs,GS_ATEST_OFF);
+    /* GS alpha tops out at 0x80; the converter maps PNG alpha into this range. */
+    u64 white=GS_SETREG_RGBAQ(0xFF,0xFF,0xFF,0x80,0x00);
     if (flip) {
         gsKit_prim_sprite_texture(gs,t,x,y,0,(float)t->Width,x+w,y+h,0,(float)t->Height,2,white);
     } else {
         gsKit_prim_sprite_texture(gs,t,x,y,0,0,x+w,y+h,(float)t->Width,(float)t->Height,2,white);
     }
-    gsKit_set_test(gs,GS_ATEST_ON);
-    gsKit_set_primalpha(gs,GS_BLEND_BACK2FRONT,0);
 }
 static void rect(float x, float y, float w, float h, u64 color) {
     gsKit_prim_sprite(gs, x, y, x + w, y + h, 2, color);
@@ -96,8 +97,15 @@ static void text(const char *s, int x, int y, int scale, u64 color) {
         if (i == (int)(sizeof(font)/sizeof(font[0]))) { x += 6 * scale; continue; }
         for (r = 0; r < 7; ++r) {
             unsigned char bits = font[i].row[r];
-            for (c = 0; c < 5; ++c) if (bits & (1 << (4-c)))
-                rect((float)(x+c*scale), (float)(y+r*scale), (float)scale, (float)scale, color);
+            c = 0;
+            while (c < 5) {
+                int start;
+                if (!(bits & (1 << (4-c)))) { ++c; continue; }
+                start = c;
+                while (c < 5 && (bits & (1 << (4-c)))) ++c;
+                rect((float)(x+start*scale), (float)(y+r*scale),
+                     (float)((c-start)*scale), (float)scale, color);
+            }
         }
         x += 6 * scale;
         if (x > SW - 10) { x = ox; y += 9 * scale; }
@@ -126,16 +134,16 @@ static void reset_game(void) {
 }
 static void draw_fish(float x, float y, float r, int facingRight, u64 body, int predator) {
     GSTEXTURE *t;
+    int anim=(frameCount/5)&3;
     float w,h;
-    if (predator) { t=&texPredator; w=r*3.6f; h=r*3.15f; }
-    else if (body==cCyan) { t=&texPlayer; w=r*3.0f; h=r*2.55f; }
-    else { t=&texPrey; w=r*3.25f; h=r*2.55f; }
+    if (predator) { t=&texPredator[anim]; w=r*3.6f; h=r*3.15f; }
+    else if (body==cCyan) { t=&texPlayer[anim]; w=r*3.0f; h=r*2.55f; }
+    else { t=&texPrey[anim]; w=r*3.25f; h=r*2.55f; }
     draw_texture(t,x-w*0.5f,y-h*0.5f,w,h,facingRight);
 }
 static void draw_bubble(float x,float y,float s) {
-    rect(x-s*0.40f,y-s,s*0.8f,2,cCyan); rect(x-s*0.40f,y+s-2,s*0.8f,2,cCyan);
-    rect(x-s,y-s*0.40f,2,s*0.8f,cCyan); rect(x+s-2,y-s*0.40f,2,s*0.8f,cCyan);
-    rect(x-s*0.35f,y-s*0.35f,2,2,cWhite);
+    rect(x-s*0.45f,y-s*0.45f,s*0.9f,s*0.9f,cCyan);
+    rect(x-s*0.25f,y-s*0.25f,2,2,cWhite);
 }
 static void background(void) {
     int i, h=(int)gs->Height;
@@ -143,24 +151,20 @@ static void background(void) {
     if (screen==TITLE) draw_texture(&texMenu,0,0,SW,(float)h,0);
     else if (level>=3) draw_texture(&texCity,0,0,SW,(float)h,0);
     else draw_texture(&texReef,0,0,SW,(float)h,0);
-    for (i=0;i<8;i++) rect(0,30+i*58,SW,2,cStripe);
     for (i=0;i<MAX_BUBBLES;i++) {
         int yy=(i*71 + frameCount*(1+i%3))%(h+24);
         int xx=(i*97+31)%SW;
         draw_bubble((float)xx,(float)(h-yy),5+(i%3)*2);
-    }
-    /* distant kelp */
-    for(i=0;i<10;i++) {
-        int x=i*72+12;
-        rect((float)x,(float)h-28,5,35,cGreen);
-        rect((float)x-8,(float)h-48,8,4,cGreen);
-        rect((float)x+3,(float)h-68,8,4,cGreen);
     }
 }
 static void draw_scene(void) {
     int i;
     char buf[40];
     gsKit_queue_reset(gs->Os_Queue);
+    gsKit_queue_reset(gs->Per_Queue);
+    /* Configure source-alpha blending once per frame (not once per sprite). */
+    gsKit_set_primalpha(gs,GS_SETREG_ALPHA(0,1,0,1,0),0);
+    gsKit_set_test(gs,GS_ATEST_OFF);
     background();
     if (screen == TITLE) {
         draw_texture(&texLogo,192,62,256,106,0);
@@ -203,9 +207,25 @@ static int setup_pad(void) {
 }
 static int read_buttons(void) {
     int state=padGetState(0,0);
-    if (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1) return 0xFFFF;
-    if (padRead(0,0,&padStatus) == 0) return 0xFFFF;
+    if (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1) {
+        padStatus.ljoy_h=128; padStatus.ljoy_v=128;
+        return 0xFFFF;
+    }
+    if (!padModeRequested) {
+        padSetMainMode(0,0,PAD_MMODE_DUALSHOCK,PAD_MMODE_LOCK);
+        padModeRequested=1;
+    }
+    if (padRead(0,0,&padStatus) == 0) {
+        padStatus.ljoy_h=128; padStatus.ljoy_v=128;
+        return 0xFFFF;
+    }
     return padStatus.btns;
+}
+static float axis_value(unsigned char raw) {
+    int delta=(int)raw-128;
+    if (delta>-18 && delta<18) return 0.0f;
+    if (delta<0) return (float)delta/110.0f;
+    return (float)delta/109.0f;
 }
 
 int main(int argc, char *argv[]) {
@@ -218,21 +238,28 @@ int main(int argc, char *argv[]) {
     dmaKit_chan_init(DMA_CHANNEL_GIF);
     gsKit_init_screen(gs);
     gsKit_mode_switch(gs,GS_PERSISTENT);
+    gs->PrimAlphaEnable=GS_SETTING_ON;
     upload_tex(&texMenu,asset_menu_bg,256,256);
     upload_tex(&texReef,asset_reef_bg,256,256);
     upload_tex(&texCity,asset_city_bg,256,256);
     upload_tex(&texLogo,asset_logo,256,128);
-    upload_tex(&texPlayer,asset_player,128,128);
-    upload_tex(&texPrey,asset_prey,64,64);
-    upload_tex(&texPredator,asset_predator,128,128);
+    {
+        unsigned char *p[4]={asset_player_0,asset_player_1,asset_player_2,asset_player_3};
+        unsigned char *q[4]={asset_prey_0,asset_prey_1,asset_prey_2,asset_prey_3};
+        unsigned char *r[4]={asset_predator_0,asset_predator_1,asset_predator_2,asset_predator_3};
+        for (i=0;i<4;i++) {
+            upload_tex(&texPlayer[i],p[i],128,128);
+            upload_tex(&texPrey[i],q[i],64,64);
+            upload_tex(&texPredator[i],r[i],128,128);
+        }
+    }
     gsKit_set_test(gs,GS_ZTEST_OFF);
-    cDeep=rgba(2,28,65); cWater=rgba(5,53,91); cStripe=rgba(8,59,92);
-    cWhite=rgba(240,250,255); cInk=rgba(4,28,46); cCyan=rgba(35,211,224);
-    cGold=rgba(255,191,64); cCoral=rgba(255,104,104); cGreen=rgba(20,121,104);
+    cDeep=rgba(2,28,65);
+    cWhite=rgba(240,250,255); cCyan=rgba(35,211,224);
+    cGold=rgba(255,191,64); cCoral=rgba(255,104,104);
     cDim=rgba(7,32,59);
     srand(0xF15F);
     setup_pad();
-    for(i=0;i<MAX_BUBBLES;i++) { bubbles[i].x=(float)rand_range(8,SW-8); bubbles[i].y=(float)rand_range(0,(int)gs->Height); }
     while (1) {
         int buttons=read_buttons();
         int pressedX=just_pressed(buttons,PAD_CROSS);
@@ -251,10 +278,20 @@ int main(int argc, char *argv[]) {
                 if ((buttons & PAD_R1)==0 && dashCooldown==0) { dashFrames=10; dashCooldown=90; }
                 if (dashFrames>0) { speed=5.5f; dashFrames--; }
                 if (dashCooldown>0) dashCooldown--;
-                if ((buttons & PAD_LEFT)==0) player.x-=speed;
-                if ((buttons & PAD_RIGHT)==0) player.x+=speed;
-                if ((buttons & PAD_UP)==0) player.y-=speed;
-                if ((buttons & PAD_DOWN)==0) player.y+=speed;
+                float moveX=axis_value(padStatus.ljoy_h);
+                float moveY=axis_value(padStatus.ljoy_v);
+                if ((buttons & PAD_LEFT)==0) moveX-=1.0f;
+                if ((buttons & PAD_RIGHT)==0) moveX+=1.0f;
+                if ((buttons & PAD_UP)==0) moveY-=1.0f;
+                if ((buttons & PAD_DOWN)==0) moveY+=1.0f;
+                if (moveX>1.0f) moveX=1.0f; if (moveX< -1.0f) moveX= -1.0f;
+                if (moveY>1.0f) moveY=1.0f; if (moveY< -1.0f) moveY= -1.0f;
+                {
+                    float magnitude=sqrtf(moveX*moveX+moveY*moveY);
+                    if (magnitude>1.0f) { moveX/=magnitude; moveY/=magnitude; }
+                }
+                player.x+=moveX*speed;
+                player.y+=moveY*speed;
                 if (player.x<player.r+4) player.x=player.r+4;
                 if (player.x>SW-player.r-4) player.x=SW-player.r-4;
                 if (player.y<60) player.y=60;
@@ -285,7 +322,7 @@ int main(int argc, char *argv[]) {
             }
         }
         lastButtons=buttons;
-        frameCount++;
+        if (screen!=PAUSED) frameCount++;
         draw_scene();
     }
     return 0;
