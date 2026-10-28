@@ -10,6 +10,7 @@
 #include <libpad.h>
 #include <gsKit.h>
 #include <dmaKit.h>
+#include <audsrv.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -20,11 +21,24 @@
 #define MAX_BUBBLES 6
 #define PLAYER_SPEED 3.1f
 #define SCORE_STEP 350
+#define MUSIC_CHANNEL 0
+#define SFX_CHANNEL_BASE 1
+
+enum { SFX_EAT, SFX_DASH, SFX_GROW, SFX_FRENZY, SFX_DEATH, SFX_GAME_OVER, SFX_EXTRA_LIFE, SFX_COUNT };
 
 typedef enum { TITLE, PLAYING, PAUSED, GAME_OVER } Screen;
 typedef struct { float x, y, r, vx; int kind, alive; } Fish;
 
 static GSGLOBAL *gs;
+extern unsigned char asset_audio_irx_start[], asset_audio_irx_end[];
+extern unsigned char asset_music_start[], asset_music_end[];
+extern unsigned char asset_eat_start[], asset_eat_end[];
+extern unsigned char asset_dash_start[], asset_dash_end[];
+extern unsigned char asset_grow_start[], asset_grow_end[];
+extern unsigned char asset_frenzy_start[], asset_frenzy_end[];
+extern unsigned char asset_death_start[], asset_death_end[];
+extern unsigned char asset_game_over_start[], asset_game_over_end[];
+extern unsigned char asset_extra_life_start[], asset_extra_life_end[];
 extern unsigned char asset_menu_bg[], asset_reef_bg[], asset_city_bg[];
 extern unsigned char asset_logo[];
 extern unsigned char asset_player_0[], asset_player_1[], asset_player_2[], asset_player_3[];
@@ -35,12 +49,17 @@ static GSTEXTURE texPlayer[4], texPrey[4], texPredator[4];
 static char padBuf[256] __attribute__((aligned(64)));
 static struct padButtonStatus padStatus;
 static int padModeRequested=0;
+static audsrv_adpcm_t musicSample, sfxSamples[SFX_COUNT];
+static int audioReady=0, audioMuted=0, musicPoll=0;
 static u64 cDeep, cWhite, cCyan, cGold, cCoral, cDim;
 static Screen screen = TITLE;
 static Fish player;
 static Fish enemies[MAX_ENEMIES];
 static int points = 0, lives = 3, level = 1, lastButtons = 0xFFFF;
 static int frameCount = 0, dashCooldown = 0, dashFrames = 0;
+static int frenzyMeter = 0, frenzyTimer = 0, nextLifeScore = 1000;
+static int immunityTimer = 0;
+static void audio_play_sfx(int id);
 
 static u64 rgba(int r, int g, int b) { return GS_SETREG_RGBAQ(r, g, b, 0x80, 0x00); }
 static void upload_tex(GSTEXTURE *t, unsigned char *pixels, int w, int h) {
@@ -54,7 +73,7 @@ static void draw_texture(GSTEXTURE *t,float x,float y,float w,float h,int flip) 
     /* GS alpha tops out at 0x80; the converter maps PNG alpha into this range. */
     u64 white=GS_SETREG_RGBAQ(0xFF,0xFF,0xFF,0x80,0x00);
     if (flip) {
-        gsKit_prim_sprite_texture(gs,t,x,y,0,(float)t->Width,x+w,y+h,0,(float)t->Height,2,white);
+        gsKit_prim_sprite_texture(gs,t,x,y,(float)t->Width,0,x+w,y+h,0,(float)t->Height,2,white);
     } else {
         gsKit_prim_sprite_texture(gs,t,x,y,0,0,x+w,y+h,(float)t->Width,(float)t->Height,2,white);
     }
@@ -128,9 +147,28 @@ static void spawn_enemy(int i, int fromLeft) {
 static void reset_game(void) {
     int i;
     points = 0; lives = 3; level = 1; dashCooldown = 0; dashFrames = 0;
+    frenzyMeter = 0; frenzyTimer = 0; nextLifeScore = 1000; immunityTimer = 0;
     player.x = 315; player.y = gs->Height * 0.52f; player.r = 17; player.alive = 1;
     for (i=0;i<MAX_ENEMIES;i++) spawn_enemy(i, rand()%2);
     screen = PLAYING;
+}
+static void add_score(int amount) {
+    int previousLives=lives;
+    points += amount;
+    while (points >= nextLifeScore) {
+        if (lives < 5) lives++;
+        nextLifeScore += 1000;
+    }
+    if (lives>previousLives) audio_play_sfx(SFX_EXTRA_LIFE);
+    if (points/SCORE_STEP+1 > level) level=points/SCORE_STEP+1;
+}
+static void grow_player(float amount) {
+    int oldBand=(int)(player.r/5.0f);
+    if (player.r<34.0f) {
+        player.r+=amount;
+        if (player.r>34.0f) player.r=34.0f;
+    }
+    if ((int)(player.r/5.0f)>oldBand) audio_play_sfx(SFX_GROW);
 }
 static void draw_fish(float x, float y, float r, int facingRight, u64 body, int predator) {
     GSTEXTURE *t;
@@ -172,7 +210,8 @@ static void draw_scene(void) {
         text("AVOID THE BIG ONES", 180, 218, 2, cWhite);
         draw_fish(270,310,22,1,cCyan,0); draw_fish(380,328,31,0,cCoral,1);
         text("PRESS X TO START", 210, 380, 2, cGold);
-        text("D PAD MOVE   START PAUSE", 160, 405, 1, cWhite);
+        text("STICK OR DPAD MOVE START PAUSE", 145, 405, 1, cWhite);
+        text("SELECT MUTE", 270, 420, 1, cWhite);
     } else {
         for(i=0;i<MAX_ENEMIES;i++) if(enemies[i].alive)
             draw_fish(enemies[i].x,enemies[i].y,enemies[i].r,enemies[i].vx>0,enemies[i].kind?cCoral:cGold,enemies[i].kind);
@@ -180,6 +219,11 @@ static void draw_scene(void) {
         snprintf(buf,sizeof(buf),"SCORE %d",points); text(buf,18,16,2,cWhite);
         snprintf(buf,sizeof(buf),"LIVES %d",lives); text(buf,440,16,2,cGold);
         snprintf(buf,sizeof(buf),"LEVEL %d",level); text(buf,270,16,2,cCyan);
+        text(audioMuted ? "MUTE" : "SOUND",560,16,1,cWhite);
+        text(frenzyTimer>0 ? "FRENZY ON" : "FRENZY",18,48,1,cGold);
+        rect(86,48,120,8,cDim);
+        if (frenzyTimer>0) rect(86,48,120*frenzyTimer/(8*60),8,cCoral);
+        else if (frenzyMeter>0) rect(86,48,120*frenzyMeter/100,8,cGold);
         if (screen == PAUSED) {
             rect(140,175,360,115,cDim);
             text("PAUSED", 240, 198, 4, cGold);
@@ -194,6 +238,54 @@ static void draw_scene(void) {
     }
     gsKit_queue_exec(gs);
     gsKit_sync_flip(gs);
+}
+
+static int audio_blob_size(unsigned char *begin, unsigned char *end) {
+    return (int)((u32)end-(u32)begin);
+}
+static int audio_load(audsrv_adpcm_t *sample, unsigned char *begin, unsigned char *end) {
+    return audsrv_load_adpcm(sample,begin,audio_blob_size(begin,end))==AUDSRV_ERR_NOERROR;
+}
+static void audio_play_sfx(int id) {
+    int channel=SFX_CHANNEL_BASE+id;
+    if (!audioReady || audioMuted || id<0 || id>=SFX_COUNT) return;
+    if (audsrv_is_adpcm_playing(channel,&sfxSamples[id])) return;
+    audsrv_adpcm_set_volume_and_pan(channel,82,0);
+    audsrv_ch_play_adpcm(channel,&sfxSamples[id]);
+}
+static void audio_toggle_mute(void) {
+    int i;
+    audioMuted=!audioMuted;
+    if (!audioReady) return;
+    audsrv_adpcm_set_volume_and_pan(MUSIC_CHANNEL,audioMuted?0:38,0);
+    for(i=0;i<SFX_COUNT;i++)
+        audsrv_adpcm_set_volume_and_pan(SFX_CHANNEL_BASE+i,audioMuted?0:82,0);
+}
+static void audio_update(void) {
+    if (!audioReady || audioMuted) return;
+    if (++musicPoll<8) return;
+    musicPoll=0;
+    if (!audsrv_is_adpcm_playing(MUSIC_CHANNEL,&musicSample)) {
+        audsrv_adpcm_set_volume_and_pan(MUSIC_CHANNEL,38,0);
+        audsrv_ch_play_adpcm(MUSIC_CHANNEL,&musicSample);
+    }
+}
+static void audio_init(void) {
+    int modResult=0, ret, i;
+    unsigned char *starts[SFX_COUNT]={asset_eat_start,asset_dash_start,asset_grow_start,
+        asset_frenzy_start,asset_death_start,asset_game_over_start,asset_extra_life_start};
+    unsigned char *ends[SFX_COUNT]={asset_eat_end,asset_dash_end,asset_grow_end,
+        asset_frenzy_end,asset_death_end,asset_game_over_end,asset_extra_life_end};
+    if (SifLoadModule("rom0:LIBSD",0,NULL)<0) return;
+    ret=SifExecModuleBuffer(asset_audio_irx_start,
+        (u32)audio_blob_size(asset_audio_irx_start,asset_audio_irx_end),0,NULL,&modResult);
+    if (ret<0 || modResult<0 || audsrv_init()!=AUDSRV_ERR_NOERROR) return;
+    if (audsrv_adpcm_init()!=AUDSRV_ERR_NOERROR) return;
+    if (!audio_load(&musicSample,asset_music_start,asset_music_end)) return;
+    for(i=0;i<SFX_COUNT;i++) if(!audio_load(&sfxSamples[i],starts[i],ends[i])) return;
+    audioReady=1;
+    audsrv_adpcm_set_volume_and_pan(MUSIC_CHANNEL,38,0);
+    audsrv_ch_play_adpcm(MUSIC_CHANNEL,&musicSample);
 }
 
 static int setup_pad(void) {
@@ -260,10 +352,12 @@ int main(int argc, char *argv[]) {
     cDim=rgba(7,32,59);
     srand(0xF15F);
     setup_pad();
+    audio_init();
     while (1) {
         int buttons=read_buttons();
         int pressedX=just_pressed(buttons,PAD_CROSS);
         int pressedStart=just_pressed(buttons,PAD_START);
+        if (just_pressed(buttons,PAD_SELECT)) audio_toggle_mute();
         if (screen==TITLE) {
             if (pressedX || pressedStart) reset_game();
         } else if (screen==GAME_OVER) {
@@ -274,8 +368,13 @@ int main(int argc, char *argv[]) {
         } else {
             if (pressedStart) screen=PAUSED;
             else {
-                float speed=PLAYER_SPEED;
-                if ((buttons & PAD_R1)==0 && dashCooldown==0) { dashFrames=10; dashCooldown=90; }
+                float speed;
+                if (frenzyTimer>0) frenzyTimer--;
+                if (immunityTimer>0) immunityTimer--;
+                speed=PLAYER_SPEED*(frenzyTimer>0 ? 1.35f : 1.0f);
+                if ((buttons & PAD_R1)==0 && dashCooldown==0) {
+                    dashFrames=10; dashCooldown=90; audio_play_sfx(SFX_DASH);
+                }
                 if (dashFrames>0) { speed=5.5f; dashFrames--; }
                 if (dashCooldown>0) dashCooldown--;
                 float moveX=axis_value(padStatus.ljoy_h);
@@ -303,17 +402,35 @@ int main(int argc, char *argv[]) {
                     {
                         float dx=f->x-player.x, dy=f->y-player.y;
                         float d2=dx*dx+dy*dy, reach=f->r+player.r*0.82f;
-                        if (d2 < reach*reach) {
-                            if (!f->kind && player.r >= f->r*0.72f) {
-                                points += 100;
-                                if (points/SCORE_STEP+1 > level) level=points/SCORE_STEP+1;
-                                if (player.r < 34) player.r += 1.6f;
+                        if (d2 < reach*reach && immunityTimer==0) {
+                            if (f->kind && frenzyTimer>0) {
+                                add_score(250); /* Frenzy lets the player eat predators. */
+                                audio_play_sfx(SFX_EAT);
+                                grow_player(2.4f);
                                 spawn_enemy(i,rand()%2);
-                            } else if (f->kind || player.r < f->r*0.72f) {
+                            } else if (!f->kind && player.r >= f->r*0.72f) {
+                                add_score(100);
+                                audio_play_sfx(SFX_EAT);
+                                if (frenzyTimer==0) {
+                                    frenzyMeter+=25;
+                                    if (frenzyMeter>=100) {
+                                        frenzyMeter=0;
+                                        frenzyTimer=8*60;
+                                        audio_play_sfx(SFX_FRENZY);
+                                    }
+                                }
+                                grow_player(1.6f);
+                                spawn_enemy(i,rand()%2);
+                            } else {
                                 lives--;
+                                audio_play_sfx(SFX_DEATH);
+                                immunityTimer=90;
                                 player.x=315; player.y=gs->Height*0.52f;
                                 spawn_enemy(i,rand()%2);
-                                if (lives<=0) screen=GAME_OVER;
+                                if (lives<=0) {
+                                    screen=GAME_OVER;
+                                    audio_play_sfx(SFX_GAME_OVER);
+                                }
                                 break;
                             }
                         }
@@ -323,6 +440,7 @@ int main(int argc, char *argv[]) {
         }
         lastButtons=buttons;
         if (screen!=PAUSED) frameCount++;
+        audio_update();
         draw_scene();
     }
     return 0;
