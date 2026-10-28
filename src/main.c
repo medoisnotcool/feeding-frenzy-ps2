@@ -352,7 +352,7 @@ int main(int argc, char *argv[]) {
     cDim=rgba(7,32,59);
     srand(0xF15F);
     setup_pad();
-    audio_init();
+    // audio_init();
     while (1) {
         int buttons=read_buttons();
         int pressedX=just_pressed(buttons,PAD_CROSS);
